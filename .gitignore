@@ -1,0 +1,12 @@
+# Real credentials - never share, never commit
+.env
+
+# Runtime state, not source
+signals/*.json
+signals/*.jsonl
+logs/*.log
+memory/memory.json
+memory/journal.md
+
+__pycache__/
+*.pyc
