@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| json_parser.mqh — Minimal JSON parser for MQL5 (flat schema)     |
 //|                                                                  |
-//| PURPOSE: Parse signal.json (written by Hermes brain) in MQL5.    |
+//| PURPOSE: Parse signal.json (written by the Python brain) in MQL5.|
 //|          Hand-rolled for OUR fixed flat schema. NOT a general    |
 //|          JSON library — no nested objects/arrays needed by EA.   |
 //|                                                                  |

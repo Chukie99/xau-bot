@@ -33,9 +33,19 @@ Neither half talks to the other directly, so you can stop either one without
 breaking the other. The brain cannot place an order without the EA's consent,
 and the EA cannot decide anything on its own.
 
-The decision step uses any OpenAI-compatible endpoint. Change what the model is
-told to weigh in [`brain/llm_client.py`](brain/llm_client.py) → `_build_prompt()`
-— that is a prompt, not code, and it is meant to be edited in plain English.
+The decision step uses any OpenAI-compatible endpoint — OpenAI, DeepSeek, Groq,
+or a local Ollama, none of which need any particular gateway. If the primary
+endpoint is down, the bot retries a second one you configure, rather than
+quietly writing `SKIP` and doing nothing.
+
+Change what the model is told to weigh in
+[`brain/llm_client.py`](brain/llm_client.py) → `_build_prompt()` — that is a
+prompt, not code, and it is meant to be edited in plain English.
+
+**On model choice:** use a fast model, not a reasoning one. The call times out
+at 40 seconds and the brain runs every 15 minutes, so a model that spends its
+budget thinking about one candle arrives too late to matter. Consistency
+between consecutive runs matters more here than cleverness.
 
 ---
 

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""llm_client.py — LLM wrapper for XAUUSD hybrid (OpenAI-compatible / 9router).
+"""llm_client.py — LLM wrapper for XAUUSD decisions (any OpenAI-compatible API).
 
-ROLE:    Talk to 9router (http://localhost:20128/v1, OpenAI-compatible)
-         for BUY/SELL/SKIP decisions. API key from .env (LLM_API_KEY).
-STATUS:  IMPLEMENTED (stage 2). Graceful when 9router is down.
+ROLE:    Talk to any OpenAI-compatible endpoint for BUY/SELL/SKIP decisions.
+         Endpoint and key come from .env. There is no dependency on any
+         particular gateway — a local proxy on one machine is a deployment
+         choice, not a requirement of the code.
+STATUS:  IMPLEMENTED. Graceful when the endpoint is down: returns SKIP with
+         the error rather than raising, so a dead provider looks like a quiet
+         no-trade day instead of a crash loop.
 """
 import os, json, sys
 from dotenv import load_dotenv
@@ -11,30 +15,41 @@ from dotenv import load_dotenv
 ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
 load_dotenv(ENV_PATH)
 
-# Fallback chain kalau model utama error (503/429/timeout).
-# Gemini diprioritasin, Cloudflare jadi cadangan biar bot nggak mati kutu.
-FALLBACK_MODEL = os.environ.get(
-    'LLM_FALLBACK_MODEL',
-    'cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-)
+# Defaults for a fresh install. Both are overridable in .env. The endpoint here
+# is only a starting point: any OpenAI-compatible base_url works, including a
+# local one (Ollama at http://localhost:11434/v1 costs nothing and needs no key).
+#
+# A reasoning model is deliberately NOT the default. The call has timeout=40
+# and the brain runs on a 15-minute cycle, so a model that spends its budget
+# thinking about one candle arrives too late to matter. Consistency across
+# consecutive runs is what a signal generator needs, not maximum cleverness.
+FALLBACK_MODEL = os.environ.get('LLM_FALLBACK_MODEL', 'gpt-4o-mini')
+FALLBACK_BASE_URL = os.environ.get('LLM_FALLBACK_BASE_URL', '')
+FALLBACK_API_KEY = os.environ.get('LLM_FALLBACK_API_KEY', '')
 
 def get_llm_config():
     return {
-        'base_url': os.environ.get('LLM_BASE_URL', 'http://localhost:20128/v1'),
+        'base_url': os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1'),
         'api_key': os.environ.get('LLM_API_KEY', ''),
-        'model': os.environ.get('LLM_MODEL', 'gemini/gemini-3.5-flash-lite'),
+        'model': os.environ.get('LLM_MODEL', 'gpt-4o-mini'),
         'fallback_model': FALLBACK_MODEL,
+        'fallback_base_url': FALLBACK_BASE_URL or os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1'),
+        'fallback_api_key': FALLBACK_API_KEY or os.environ.get('LLM_API_KEY', ''),
     }
 
-# client lazily created so import never fails when server is down
-_client = None
-def _get_client():
-    global _client
-    if _client is None:
-        from openai import OpenAI
-        cfg = get_llm_config()
-        _client = OpenAI(base_url=cfg['base_url'], api_key=cfg['api_key'])
-    return _client
+# Clients are cached per base_url rather than in one global. The fallback may
+# point at a different provider with a different key, so it needs its own
+# client — reusing the primary's would send the fallback request to an endpoint
+# that just failed, which is the one thing a fallback must not do.
+_clients = {}
+def _get_client(base_url=None, api_key=None):
+    from openai import OpenAI
+    cfg = get_llm_config()
+    url = base_url or cfg['base_url']
+    key = api_key or cfg['api_key']
+    if url not in _clients:
+        _clients[url] = OpenAI(base_url=url, api_key=key)
+    return _clients[url]
 
 def analyze_xau(memory: dict, indicators: dict) -> dict:
     """Ask LLM for a decision. Returns dict:
@@ -88,10 +103,18 @@ def analyze_xau(memory: dict, indicators: dict) -> dict:
         return decision
     except Exception as e:
         primary_err = str(e)
-        # FALLBACK: model utama error (503/429/timeout/invalid) → coba model cadangan
-        if cfg_fb.get('fallback_model') and cfg_fb['fallback_model'] != cfg['model']:
+        # FALLBACK: primary errored (503/429/timeout/invalid) -> try the backup.
+        # The guard is on the pair, not the model name: a "fallback" that
+        # resolves to the same endpoint as the primary is not a fallback, it is
+        # a second attempt at the thing that just failed.
+        fb_model = cfg_fb.get('fallback_model')
+        fb_url = cfg_fb.get('fallback_base_url')
+        fb_key = cfg_fb.get('fallback_api_key')
+        same_target = (fb_model == cfg['model']) and (fb_url == cfg['base_url'])
+        if fb_model and not same_target:
             try:
-                fb_resp = client.chat.completions.create(
+                fb_client = _get_client(fb_url, fb_key)
+                fb_resp = fb_client.chat.completions.create(
                     model=cfg_fb['fallback_model'],
                     messages=[
                         {'role': 'system', 'content': (
@@ -120,6 +143,7 @@ def analyze_xau(memory: dict, indicators: dict) -> dict:
                 fb_decision.setdefault('reason', '')
                 fb_decision['model_used'] = cfg_fb['fallback_model']
                 fb_decision['fallback'] = True
+                fb_decision['fallback_provider'] = fb_url
                 fb_decision['primary_error'] = primary_err
                 return fb_decision
             except Exception as fb_e:

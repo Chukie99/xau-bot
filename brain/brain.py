@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""brain.py — XAUUSD hybrid: Hermes brain (decision) + MQL5 EA (executor).
+"""brain.py — XAUUSD: Python brain (decision) + MQL5 EA (executor).
 
 ROLE:    One cycle: fetch -> indicators -> memory -> LLM decision ->
          write signals/signal.json (EA reads) + append journal.

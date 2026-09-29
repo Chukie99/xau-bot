@@ -7,7 +7,7 @@
 //|   - SL/TP wajib dari signal.json (skip kalau missing).           |
 //|   - Weekend skip. Spread > $3 skip. Drawdown 5% ($50) halt.      |
 //|                                                                  |
-//| DESIGN: Hermes (Python) = brain writes signals/signal.json.      |
+//| DESIGN: Python brain writes signals/signal.json.                 |
 //|         This EA = tangan — reads it, logs it, places order.      |
 //+------------------------------------------------------------------+
 #property copyright "SOPIAN XAU Hybrid"
@@ -306,7 +306,7 @@ int OnInit()
       Print("signal.json EXISTS at: ", InpSignalPath);
    else
       Print("signal.json NOT FOUND at: ", InpSignalPath,
-            " — check junction (Files\\signals -> hermes-logs\\signals) or copy file.");
+            " — check junction (Files\\signals -> signals) or copy file.");
    CheckDayRollover();
    EventSetTimer(InpPollSec);
    return(INIT_SUCCEEDED);
