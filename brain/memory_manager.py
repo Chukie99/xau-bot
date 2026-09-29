@@ -57,7 +57,19 @@ def get_performance_by_condition(mem: dict | None = None) -> dict:
     return m.get('performance_by_condition', {})
 
 def add_trade(mem: dict, trade: dict) -> dict:
-    """Append a closed-trade record, update win_rate + performance_by_condition."""
+    """Append a closed-trade record, update win_rate + performance_by_condition.
+
+    Idempotent on `position_id` when present. A trade that gets closed twice —
+    an EA restart mid-close, a partial close followed by the remainder, or a
+    re-run over the same history window — would otherwise be counted twice and
+    inflate every aggregate, including the win rate the LLM is shown. A repeated
+    position_id is a duplicate, not a second trade, so it is dropped.
+    """
+    pid = trade.get('position_id')
+    if pid is not None:
+        seen = {t.get('position_id') for t in mem.get('trades', [])}
+        if pid in seen:
+            return mem
     mem.setdefault('trades', []).append(trade)
     # win_rate overall
     wins = sum(1 for t in mem['trades'] if t.get('pnl', 0) > 0)

@@ -21,6 +21,7 @@ import xau_fetch
 import memory_manager
 import llm_client
 import news_filter
+import trade_sync
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIGNALS_DIR = os.path.join(ROOT, 'signals')
@@ -53,9 +54,21 @@ def risk_check() -> dict:
     if now.weekday() >= 5:
         return {'pass': False, 'reason': 'WEEKEND: pasar XAU tutup. SKIP.'}
     # NEWS FILTER — skip 5 menit sebelum/sesudah event high-impact (NFP/CPI/FOMC dsb)
+    #
+    # news_block_reason returns a string for two different situations, and
+    # treating them alike would turn a fail-open guard into a fail-closed one:
+    # an unreadable calendar must NOT stop trading, it must only be recorded.
+    # So the verdict is decided by whether the reason is a real block, and the
+    # uncertainty is passed through as a note instead.
     news_reason = news_filter.news_block_reason(now)
+    news_note = ''
     if news_reason:
-        return {'pass': False, 'reason': news_reason}
+        if news_reason.startswith('NEWS UNKNOWN'):
+            news_note = news_reason
+            log(news_note)
+        else:
+            return {'pass': False, 'reason': news_reason}
+
     # baca trade_result.json (hasil close terakhir) — update oleh EA/ECN
     day_loss, day_trades = 0.0, 0
     try:
@@ -82,7 +95,7 @@ def risk_check() -> dict:
         return {'pass': False, 'reason': f'MAX TRADES/DAY: {day_trades} >= {RISK_MAX_TRADES_DAY}. SKIP.'}
     if (balance - equity_estimate()) >= dd_limit:
         return {'pass': False, 'reason': f'DRAWDOWN LIMIT: ${balance-equity_estimate():.2f} >= ${dd_limit:.2f} (5% modal). SKIP.'}
-    return {'pass': True, 'reason': ''}
+    return {'pass': True, 'reason': '', 'note': news_note}
 
 def equity_estimate() -> float:
     """Estimasi equity dari trade_result.json kalau ada floating, fallback balance."""
@@ -178,7 +191,30 @@ def main():
         write_signal({'action': 'SKIP', 'reason': f'fetch failed: {e}'}, {})
         return 1
 
-    # 2. memory
+    # 2. record anything that closed since the last cycle
+    #
+    #    This runs before load_memory on purpose. Loading first would mean the
+    #    decision made this cycle is made against a memory that is one trade
+    #    stale, which is the opposite of the point of having a memory.
+    #
+    #    It is read-only against MT5 and only writes memory.json. A terminal
+    #    that is closed yields status 'mt5_unavailable', which is logged as
+    #    that rather than treated as "no trades" — those are different facts
+    #    and conflating them makes a working bot look idle.
+    try:
+        sr = trade_sync.sync()
+        if sr.get('added'):
+            log(f"trade_sync: recorded {sr['added']} closed trade(s) | "
+                f"total={sr.get('total')} win_rate={sr.get('win_rate')} "
+                f"max_dd={sr.get('max_drawdown')}")
+        elif sr.get('status') == 'mt5_unavailable':
+            log(f"trade_sync: {sr['status']} ({sr.get('detail')}) — memory not updated")
+        else:
+            log(f"trade_sync: no new closed trades (total={sr.get('total', '?')})")
+    except Exception as e:
+        log(f'trade_sync failed (non-fatal): {e}')
+
+    # 3. memory
     mem = memory_manager.load_memory()
     log(f'memory loaded: trades={len(mem.get("trades", []))} max_dd={mem.get("max_drawdown")}')
 
@@ -192,6 +228,12 @@ def main():
         append_history(signal, indicators)
         memory_manager.append_journal(f'## {timestamp_now()} (WIB)\n- Signal: **SKIP** XAUUSD | conf=Low\n- Alasan: {reason}\n- Status: risk guard (EA read-only)')
         return 0
+    if rc.get('note'):
+        # Not a block. The decision still gets made, but the model is told the
+        # news calendar could not be read, because a decision taken on partial
+        # information should be made knowingly rather than quietly.
+        mem = dict(mem)
+        mem['news_note'] = rc['note']
 
     # 3. LLM decision
     decision = llm_client.analyze_xau(mem, indicators)

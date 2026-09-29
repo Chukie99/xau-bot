@@ -45,35 +45,59 @@ def _save_cache(events: list) -> None:
     except Exception:
         pass
 
-def get_upcoming_events(force_refresh=False) -> list:
-    """Kembalikan list event HIGH impact (USD/EUR/GBP) minggu ini. Fail-open."""
+def get_upcoming_events(force_refresh=False) -> tuple:
+    """Return (events, state) where state is one of:
+
+        'cached'  — served from a cache file that is still fresh
+        'fetched' — calendar downloaded and parsed this call
+        'unknown' — the calendar could not be read
+
+    'unknown' is not the same as 'no events'. Fail-open means an unreadable
+    calendar must not block trading, and that stays true — but the caller has to
+    be able to tell "I checked and there is nothing scheduled" from "I could not
+    check". A news guard that cannot distinguish those two is indistinguishable
+    from a guard that was never installed.
+    """
     events = [] if force_refresh else _load_cache()
-    if not events:
-        try:
-            raw = _fetch()
-            for ev in raw:
-                title = str(ev.get('title', '')).upper()
-                country = str(ev.get('country', '')).upper()
-                impact = str(ev.get('impact', '')).upper()
-                if impact == 'HIGH' and country in HIGH_COUNTRIES:
-                    # kritis kalau judul match OR event high-impact apa pun (conservative)
-                    events.append({
-                        'title': ev.get('title', ''),
-                        'country': country,
-                        'date': ev.get('date', ''),
-                        'critical': any(k in title for k in CRITICAL_TITLES),
-                    })
-            _save_cache(events)
-        except Exception as e:
-            print(f'[news] fetch gagal (fail-open): {e}', flush=True)
-            return []
-    return events
+    if events:
+        return events, 'cached'
+    try:
+        raw = _fetch()
+    except Exception as e:
+        print(f'[news] fetch gagal, calendar UNKNOWN (fail-open, trading not blocked): {e}',
+              flush=True)
+        return [], 'unknown'
+
+    for ev in raw:
+        title = str(ev.get('title', '')).upper()
+        country = str(ev.get('country', '')).upper()
+        impact = str(ev.get('impact', '')).upper()
+        if impact == 'HIGH' and country in HIGH_COUNTRIES:
+            # kritis kalau judul match OR event high-impact apa pun (conservative)
+            events.append({
+                'title': ev.get('title', ''),
+                'country': country,
+                'date': ev.get('date', ''),
+                'critical': any(k in title for k in CRITICAL_TITLES),
+            })
+    _save_cache(events)
+    return events, 'fetched'
 
 def news_block_reason(now=None) -> str:
-    """Return reason string kalau sekarang dalam window news (5 mnt sebelum/sesudah), else ''."""
+    """Return a reason string to block, or '' to allow the trade.
+
+    '' means the calendar was read and nothing critical is within the window.
+    If the calendar could not be read, the trade is still allowed (fail-open)
+    but the reason string names the uncertainty, so the decision written to
+    signal.json and the journal says why it was taken on incomplete
+    information rather than implying the news was checked.
+    """
     if now is None:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
-    events = get_upcoming_events()
+    events, state = get_upcoming_events()
+    if state == 'unknown':
+        return (f'NEWS UNKNOWN: economic calendar unreadable — not blocking, but this '
+                f'decision is made without news data. Treat as higher uncertainty.')
     if not events:
         return ''
     now_ts = now.timestamp()
@@ -88,4 +112,6 @@ def news_block_reason(now=None) -> str:
     return ''
 
 if __name__ == '__main__':
-    print(json.dumps(get_upcoming_events(), indent=2, ensure_ascii=False))
+    evs, st = get_upcoming_events()
+    print(f'state: {st}  events: {len(evs)}')
+    print(json.dumps(evs, indent=2, ensure_ascii=False))

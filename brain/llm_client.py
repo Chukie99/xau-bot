@@ -154,10 +154,48 @@ def analyze_xau(memory: dict, indicators: dict) -> dict:
                 'confidence': 'Low', 'reason': f'LLM error: {primary_err}'}
 
 def _build_prompt(memory: dict, indicators: dict) -> str:
-    """Compact prompt: memory stats + current indicators per TF."""
+    """Compact prompt: memory stats + per-side record + current indicators per TF."""
     trades_n = len(memory.get('trades', []))
     wr = memory.get('win_rate', {})
     mem_summary = f"Trades: {trades_n}, win_rate: {wr}, max_drawdown: {memory.get('max_drawdown', 0)}"
+
+    # Per-side and per-condition record.
+    #
+    # A single win_rate over a small sample is actively misleading: 13/15
+    # overall reads as "this works" while every one of those wins was a SELL
+    # into a downtrend, and the 2 BUY attempts both lost. The model needs the
+    # split, otherwise it will happily buy on a setup that has never once
+    # worked, because the aggregate number gives it no reason not to.
+    #
+    # Small samples are also shown as raw counts with no percentage dressing —
+    # 2 trades is not a 0% win rate, it is 2 trades, and the prompt says so.
+    by_side = memory.get('performance_by_condition', {}) or {}
+    side_lines = []
+    for side, st in by_side.items():
+        if not isinstance(st, dict):
+            continue
+        n = st.get('trades', 0)
+        w = st.get('wins', 0)
+        l = n - w
+        pnl = st.get('pnl', 0.0)
+        if n >= 3:
+            rec = f"{w}/{n} win ({w / n:.0%})"
+        else:
+            rec = f"{w} win / {l} loss out of {n} — too few to call a rate"
+        side_lines.append(f"  {side}: {rec}, net P/L ${pnl:+.2f}")
+    if side_lines:
+        mem_summary += "\nRecord by direction:\n" + "\n".join(side_lines)
+        mem_summary += (
+            "\nTreat a small or absent sample as a reason for caution, not "
+            "permission. Never read a losing record as 'this side never works' "
+            "on 2 trades; read it as 'unproven either way'."
+        )
+
+    # An unreadable news calendar travels with the request so a decision made
+    # without it is at least a decision the model knows it made.
+    if memory.get('news_note'):
+        mem_summary += f"\nData gap: {memory['news_note']}"
+
     ind_lines = []
     for tf, d in indicators.items():
         if not isinstance(d, dict) or 'error' in d:
